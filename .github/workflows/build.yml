@@ -314,7 +314,6 @@ jobs:
             'D3Dcompiler_47.dll',
             'opengl32sw.dll',
             'steam_api64.dll',
-            'steamwebrtc64.dll',
             'runtime\plugins\platforms\qwindows.dll',
             'runtime\plugins\imageformats\qsvg.dll',
             'runtime\plugins\styles\qmodernwindowsstyle.dll',
@@ -340,6 +339,12 @@ jobs:
             if (-not (Test-Path $path -PathType Leaf)) {
               throw "Required Windows runtime file is missing: $relativePath"
             }
+          }
+          $webrtc = Join-Path $dest 'steamwebrtc64.dll'
+          if (Test-Path $webrtc -PathType Leaf) {
+            Write-Host 'Steamworks WebRTC runtime is packaged; ICE direct transport is available.'
+          } else {
+            Write-Warning 'steamwebrtc64.dll is not present; the Windows package will use Steam relay transport without ICE direct transport.'
           }
           foreach ($unexpected in @('platforms', 'imageformats', 'styles', 'tls')) {
             if (Test-Path (Join-Path $dest $unexpected)) {

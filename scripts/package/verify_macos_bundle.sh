@@ -42,7 +42,12 @@ while IFS= read -r -d '' binary; do
   if ! file "$binary" | grep -q 'Mach-O'; then
     continue
   fi
+  binary_abs="$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")"
   while IFS= read -r dependency; do
+    if [[ "$dependency" == "$binary" || "$dependency" == "./$binary" ||
+          "$dependency" == "$binary_abs" ]]; then
+      continue
+    fi
     case "$dependency" in
       @rpath/*.framework/*)
         framework="${dependency#@rpath/}"
