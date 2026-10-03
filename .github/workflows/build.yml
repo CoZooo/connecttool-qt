@@ -467,8 +467,18 @@ jobs:
           path: ${{ steps.package.outputs.artifact_dir }}
           if-no-files-found: error
   build-macos:
-    runs-on: macos-15-intel
-    name: Build (macOS)
+    name: Build (macOS ${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            runner: macos-15-intel
+            cmake_arch: x86_64
+          - name: arm64
+            runner: xcode-27
+            cmake_arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -540,7 +550,7 @@ jobs:
             -G Ninja \
             -DCMAKE_BUILD_TYPE="${{ env.BUILD_TYPE }}" \
             -DCMAKE_PREFIX_PATH="${{ env.Qt6_DIR }}" \
-            -DCMAKE_OSX_ARCHITECTURES=x86_64
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }}
       - name: Restore QmlMaterial build cache
         id: qml-material-cache-restore
         uses: actions/cache/restore@v5
@@ -552,9 +562,9 @@ jobs:
             build/qml_modules/Qcm/Material
             build/.ninja_deps
             build/.ninja_log
-          key: qml-material-${{ env.CMAKE_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-qt${{ env.QT_VERSION }}-${{ env.BUILD_TYPE }}-${{ hashFiles('CMakeLists.txt', 'deps/cmake/*.cmake', 'modules/ConnectTool/CMakeLists.txt', 'flake.lock') }}
+          key: qml-material-${{ env.CMAKE_CACHE_SCHEMA }}-${{ runner.os }}-${{ matrix.name }}-${{ steps.runner-image.outputs.version }}-qt${{ env.QT_VERSION }}-${{ env.BUILD_TYPE }}-${{ hashFiles('CMakeLists.txt', 'deps/cmake/*.cmake', 'modules/ConnectTool/CMakeLists.txt', 'flake.lock') }}
           restore-keys: |
-            qml-material-${{ env.CMAKE_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-qt${{ env.QT_VERSION }}-${{ env.BUILD_TYPE }}-
+            qml-material-${{ env.CMAKE_CACHE_SCHEMA }}-${{ runner.os }}-${{ matrix.name }}-${{ steps.runner-image.outputs.version }}-qt${{ env.QT_VERSION }}-${{ env.BUILD_TYPE }}-
       - name: Build
         run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
       - name: Save QmlMaterial build cache
@@ -599,9 +609,29 @@ jobs:
             exit 1
           fi
           mkdir -p "$frameworks_dir"
-          cp -f "$sdk_dir/libsteam_api.dylib" "$frameworks_dir/"
+          rm -f "$frameworks_dir/libsteam_api.dylib" "$frameworks_dir/libsteamwebrtc.dylib"
+          copy_for_arch() {
+            local source="$1"
+            local target="$2"
+            local archs
+            archs="$(lipo -archs "$source")"
+            if ! grep -Fqw "${{ matrix.cmake_arch }}" <<<"$archs"; then
+              echo "::error::$source does not contain the ${{ matrix.cmake_arch }} architecture (found: $archs)"
+              exit 1
+            fi
+            if [[ "$(wc -w <<<"$archs")" -gt 1 ]]; then
+              lipo "$source" -thin "${{ matrix.cmake_arch }}" -output "$target"
+            else
+              cp -f "$source" "$target"
+            fi
+          }
+          copy_for_arch "$sdk_dir/libsteam_api.dylib" "$frameworks_dir/libsteam_api.dylib"
           if [[ -f "$sdk_dir/libsteamwebrtc.dylib" ]]; then
-            cp -f "$sdk_dir/libsteamwebrtc.dylib" "$frameworks_dir/"
+            if lipo -archs "$sdk_dir/libsteamwebrtc.dylib" | grep -Fqw "${{ matrix.cmake_arch }}"; then
+              copy_for_arch "$sdk_dir/libsteamwebrtc.dylib" "$frameworks_dir/libsteamwebrtc.dylib"
+            else
+              echo "Steamworks WebRTC runtime has no ${{ matrix.cmake_arch }} slice; omitting it from this package"
+            fi
           fi
           bin="$app/Contents/MacOS/connecttool-qt"
           if [[ -x "$app/Contents/MacOS/.connecttool-qt-wrapped" ]]; then
@@ -629,6 +659,16 @@ jobs:
         run: |
           set -euo pipefail
           app="build/connecttool-qt.app"
+          target_arch="${{ matrix.cmake_arch }}"
+          while IFS= read -r -d '' binary; do
+            if file "$binary" | grep -q 'Mach-O'; then
+              archs="$(lipo -archs "$binary")"
+              if ! grep -Fqw "$target_arch" <<<"$archs"; then
+                echo "::error::Packaged Mach-O lacks $target_arch: $binary (found: $archs)"
+                exit 1
+              fi
+            fi
+          done < <(find "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/PlugIns" -type f -print0)
           scripts/package/verify_macos_bundle.sh "$app"
           screenshot="${RUNNER_TEMP}/connecttool-macos-render.png"
           log="${RUNNER_TEMP}/connecttool-macos-render.log"
@@ -642,7 +682,7 @@ jobs:
         run: |
           set -euo pipefail
           dmg_dir="$(mktemp -d "${RUNNER_TEMP}/connecttool-dmg.XXXXXX")"
-          dmg_path="${{ github.workspace }}/dist/connecttool-qt-macos-x86_64.dmg"
+          dmg_path="${{ github.workspace }}/dist/connecttool-qt-macos-${{ matrix.name }}.dmg"
           rm -f "$dmg_path"
           mkdir -p "$(dirname "$dmg_path")"
           cp -R "build/connecttool-qt.app" "$dmg_dir/"
@@ -656,8 +696,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: connecttool-qt-macos-x86_64
-          path: dist/connecttool-qt-macos-x86_64.dmg
+          name: connecttool-qt-macos-${{ matrix.name }}
+          path: dist/connecttool-qt-macos-${{ matrix.name }}.dmg
           if-no-files-found: error
   build-appimage:
     runs-on: ubuntu-latest
@@ -860,14 +900,19 @@ jobs:
           fi
 
           windows_dir="dist/connecttool-qt-windows-x86_64"
-          macos_files=(dist/connecttool-qt-macos-x86_64/*.dmg)
+          macos_x86_64_files=(dist/connecttool-qt-macos-x86_64/*.dmg)
+          macos_arm64_files=(dist/connecttool-qt-macos-arm64/*.dmg)
           linux_files=(dist/connecttool-qt-linux-x86_64/*.AppImage)
           if [[ ! -d "$windows_dir" ]]; then
             echo "::error::Windows release artifact is missing"
             exit 1
           fi
-          if (( ${#macos_files[@]} != 1 )); then
-            echo "::error::Expected exactly one macOS DMG"
+          if (( ${#macos_x86_64_files[@]} != 1 )); then
+            echo "::error::Expected exactly one macOS x86_64 DMG"
+            exit 1
+          fi
+          if (( ${#macos_arm64_files[@]} != 1 )); then
+            echo "::error::Expected exactly one macOS arm64 DMG"
             exit 1
           fi
           if (( ${#linux_files[@]} != 1 )); then
@@ -879,8 +924,10 @@ jobs:
           cmake -E chdir dist cmake -E tar cf \
             "release/connecttool-qt-${RELEASE_VERSION}-windows-x86_64.zip" \
             --format=zip connecttool-qt-windows-x86_64
-          cp -- "${macos_files[0]}" \
+          cp -- "${macos_x86_64_files[0]}" \
             "dist/release/connecttool-qt-${RELEASE_VERSION}-macos-x86_64.dmg"
+          cp -- "${macos_arm64_files[0]}" \
+            "dist/release/connecttool-qt-${RELEASE_VERSION}-macos-arm64.dmg"
           cp -- "${linux_files[0]}" \
             "dist/release/connecttool-qt-${RELEASE_VERSION}-linux-x86_64.AppImage"
       - name: Generate release notes
